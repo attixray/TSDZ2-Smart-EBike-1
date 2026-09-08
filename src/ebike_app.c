@@ -16,6 +16,7 @@
 #include "uart.h"
 #include "eeprom.h"
 #include "lights.h"
+#include "display_menu.h"
 #include "common.h"
 #include "config.h"
 
@@ -27,6 +28,8 @@ static uint8_t ui8_assist_level_temp = ECO;
 static uint8_t ui8_assist_level_5_flag = 0;
 static uint8_t ui8_riding_mode_temp = 0;
 static uint8_t ui8_lights_flag = 0;
+/* Display-only blinking: three 100 ms ticks OFF, four ON. */
+static uint8_t ui8_display_flash_phase = 0;
 static uint8_t ui8_lights_on_5s = 0;
 static uint8_t ui8_menu_flag = 0;
 static uint8_t ui8_menu_index = 0;
@@ -51,13 +54,8 @@ static uint8_t ui8_torque_sensor_adv_enabled_temp = TORQUE_SENSOR_ADV_ON_STARTUP
 static uint8_t ui8_assist_without_pedal_rotation_temp = MOTOR_ASSISTANCE_WITHOUT_PEDAL_ROTATION;
 static uint8_t ui8_walk_assist_enabled_array[2] = {ENABLE_WALK_ASSIST,STREET_MODE_WALK_ENABLED};
 static uint8_t ui8_display_riding_mode = 0;
-static uint8_t ui8_display_lights_configuration = 0;
-static uint8_t ui8_display_alternative_lights_configuration = 0;
+static uint8_t ui8_display_turbo_function_status = 0;
 static uint8_t ui8_display_function_status[3][5];
-static uint8_t ui8_lights_configuration_1 = LIGHTS_CONFIGURATION_1;
-static uint8_t ui8_lights_configuration_2 = LIGHTS_CONFIGURATION_2;
-static uint8_t ui8_lights_configuration_3 = LIGHTS_CONFIGURATION_3;
-static uint8_t ui8_lights_configuration_temp = LIGHTS_CONFIGURATION_ON_STARTUP;
 static uint8_t ui8_lights_counter = 0;
 
 // system
@@ -66,7 +64,6 @@ static uint8_t ui8_riding_mode_parameter = 0;
 volatile uint8_t ui8_system_state = NO_ERROR;
 volatile uint8_t ui8_motor_enabled = 1;
 static uint8_t ui8_assist_without_pedal_rotation_threshold = ASSISTANCE_WITHOUT_PEDAL_ROTATION_THRESHOLD;
-static uint8_t ui8_lights_state = 0;
 static uint8_t ui8_lights_button_flag = 0;
 static uint8_t ui8_optional_ADC_function = OPTIONAL_ADC_FUNCTION;
 static uint8_t ui8_walk_assist_level = 0;
@@ -279,7 +276,6 @@ static void get_pedal_torque(void);
 static void calc_wheel_speed(void);
 static void calc_cadence(void);
 
-static void ebike_control_lights(void);
 static void ebike_control_motor(void);
 static void check_system(void);
 
@@ -387,8 +383,6 @@ void ebike_app_init(void)
 	ui8_display_function_status[2][TURBO] = m_configuration_variables.ui8_assist_with_error_enabled;
 	// riding mode on startup
 	ui8_display_riding_mode = m_configuration_variables.ui8_riding_mode;
-	// lights configuration on startup
-	ui8_display_lights_configuration = m_configuration_variables.ui8_lights_configuration;
 	
 	// percentage remaining battery capacity x10 at power on
 	ui16_battery_SOC_percentage_x10 = ((uint16_t) m_configuration_variables.ui8_battery_SOC_percentage_8b) << 2;
@@ -461,7 +455,16 @@ void ebike_app_controller(void)
     // Calculate filtered Battery Current (Ampx10)
 	ui8_battery_current_filtered_x10 = (uint8_t)(((uint16_t)(ui8_adc_battery_current_filtered * (uint8_t)BATTERY_CURRENT_PER_10_BIT_ADC_STEP_X100)) / 10U);
 	
-	// send/receive data, ebike control lights, calc oem wheelspeed, 
+    /* Actual light switch, excluding temporary menu illumination.
+     * ENABLE_LIGHTS controls the switch; brake lighting is independent.
+     */
+#if ENABLE_LIGHTS
+    lights_profile_update(ui8_lights_flag, ui8_brake_state);
+#else
+    lights_profile_update(0, ui8_brake_state);
+#endif
+
+	// send/receive data, calc oem wheelspeed,
 	// check system, check battery soc, every 4 cycles (25ms * 4)
 	
 	switch (ui8_counter++ & 0x03) {
@@ -469,7 +472,9 @@ void ebike_app_controller(void)
 			uart_receive_package();
 			break;
 		case 1:
-			ebike_control_lights();
+            if (++ui8_display_flash_phase >= 7U) {
+                ui8_display_flash_phase = 0;
+            }
 			calc_oem_wheel_speed();
 			calc_watt_hours_used();
 			break;
@@ -2017,195 +2022,6 @@ static void check_system(void)
 }
 
 
-static uint8_t ui8_default_flash_state;
-static uint8_t ui8_default_flash_state_counter; // increments every function call -> 100 ms
-static uint8_t ui8_braking_flash_state;
-static uint8_t ui8_braking_flash_state_counter; // increments every function call -> 100 ms
-
-void ebike_control_lights(void)
-{
-#define DEFAULT_FLASH_ON_COUNTER_MAX      3
-#define DEFAULT_FLASH_OFF_COUNTER_MAX     2
-#define BRAKING_FLASH_ON_COUNTER_MAX      1
-#define BRAKING_FLASH_OFF_COUNTER_MAX     1
-	
-    // increment flash counters
-    ++ui8_default_flash_state_counter;
-    ++ui8_braking_flash_state_counter;
-
-    /****************************************************************************/
-
-    // set default flash state
-    if ((ui8_default_flash_state) && (ui8_default_flash_state_counter > DEFAULT_FLASH_ON_COUNTER_MAX)) {
-        // reset flash state counter
-        ui8_default_flash_state_counter = 0;
-
-        // toggle flash state
-        ui8_default_flash_state = 0;
-    }
-	else if ((!ui8_default_flash_state) && (ui8_default_flash_state_counter > DEFAULT_FLASH_OFF_COUNTER_MAX)) {
-        // reset flash state counter
-        ui8_default_flash_state_counter = 0;
-
-        // toggle flash state
-        ui8_default_flash_state = 1;
-    }
-
-    /****************************************************************************/
-
-    // set braking flash state
-    if ((ui8_braking_flash_state) && (ui8_braking_flash_state_counter > BRAKING_FLASH_ON_COUNTER_MAX)) {
-        // reset flash state counter
-        ui8_braking_flash_state_counter = 0;
-
-        // toggle flash state
-        ui8_braking_flash_state = 0;
-    }
-	else if ((!ui8_braking_flash_state) && (ui8_braking_flash_state_counter > BRAKING_FLASH_OFF_COUNTER_MAX)) {
-        // reset flash state counter
-        ui8_braking_flash_state_counter = 0;
-
-        // toggle flash state
-        ui8_braking_flash_state = 1;
-    }
-
-    /****************************************************************************/
-
-    // select lights configuration
-    switch (m_configuration_variables.ui8_lights_configuration) {
-      case 0:
-        // set lights
-        lights_set_state(ui8_lights_state);
-        break;
-      case 1:
-        // check lights state
-        if (ui8_lights_state) {
-            // set lights
-            lights_set_state(ui8_default_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 2:
-        // check light and brake state
-        if (ui8_lights_state && ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_braking_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 3:
-        // check light and brake state
-        if (ui8_lights_state && ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_brake_state);
-        }
-		else if (ui8_lights_state) {
-            // set lights
-            lights_set_state(ui8_default_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 4:
-        // check light and brake state
-        if (ui8_lights_state && ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_braking_flash_state);
-        }
-		else if (ui8_lights_state) {
-            // set lights
-            lights_set_state(ui8_default_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 5:
-        // check brake state
-        if (ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_brake_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 6:
-        // check brake state
-        if (ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_braking_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 7:
-        // check brake state
-        if (ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_brake_state);
-        }
-		else if (ui8_lights_state) {
-            // set lights
-            lights_set_state(ui8_default_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-      case 8:
-        // check brake state
-        if (ui8_brake_state) {
-            // set lights
-            lights_set_state(ui8_braking_flash_state);
-        }
-		else if (ui8_lights_state) {
-            // set lights
-            lights_set_state(ui8_default_flash_state);
-        }
-		else {
-            // set lights
-            lights_set_state(ui8_lights_state);
-        }
-        break;
-	  default:
-        // set lights
-        lights_set_state(ui8_lights_state);
-        break;
-    }
-
-    /*------------------------------------------------------------------------------------------------------------------
-
-     NOTE: regarding the various light modes
-
-     (0) lights ON when enabled
-     (1) lights FLASHING when enabled
-
-     (2) lights ON when enabled and BRAKE-FLASHING when braking
-     (3) lights FLASHING when enabled and ON when braking
-     (4) lights FLASHING when enabled and BRAKE-FLASHING when braking
-
-     (5) lights ON when enabled, but ON when braking regardless if lights are enabled
-     (6) lights ON when enabled, but BRAKE-FLASHING when braking regardless if lights are enabled
-
-     (7) lights FLASHING when enabled, but ON when braking regardless if lights are enabled
-     (8) lights FLASHING when enabled, but BRAKE-FLASHING when braking regardless if lights are enabled
-
-     ------------------------------------------------------------------------------------------------------------------*/
-}
 
 // This is the interrupt that happens when UART2 receives data. We need it to be the fastest possible and so
 // we do: receive every byte and assembly as a package, finally, signal that we have a package to process (on main slow loop)
@@ -2354,8 +2170,8 @@ static void uart_receive_package(void)
 							ui8_menu_index = 1;
 						}
 						
-						// display status alternative lights configuration
-						ui8_display_alternative_lights_configuration = 0;
+						// display status TURBO function
+						ui8_display_turbo_function_status = 0;
 						
 						// restore previous parameter
 						switch (ui8_assist_level) {	
@@ -2395,45 +2211,35 @@ static void uart_receive_package(void)
 							case TURBO:	
 								switch (ui8_menu_index) {
 									case 1:
-										if (ui8_lights_configuration_1 == 11) {
+#if TURBO_MENU_STARTUP_ASSIST_ENABLED
 											// display status
-											ui8_display_alternative_lights_configuration = 1;
-										}
+											ui8_display_turbo_function_status = 1;
+#endif
 										break;
 									case 2:
-										if (ui8_lights_configuration_1 == 11) {
+#if TURBO_MENU_STARTUP_ASSIST_ENABLED
 											// restore previous startup assist enabled
 											m_configuration_variables.ui8_startup_assist_enabled = ui8_startup_assist_enabled_temp;
 											ui8_display_function_status[0][TURBO] = m_configuration_variables.ui8_startup_assist_enabled;
-										}
-										else {
-											// restore previous lights configuration
-											m_configuration_variables.ui8_lights_configuration = ui8_lights_configuration_temp;
-										}
-										if (ui8_lights_configuration_2 == 9) {
+#endif
+#if TURBO_MENU_ASSIST_WITHOUT_PEDAL_ENABLED
 											// display status
-											ui8_display_alternative_lights_configuration = 1;
-										}
+											ui8_display_turbo_function_status = 1;
+#endif
 										break;
 									case 3:
-										if (ui8_lights_configuration_2 == 9) {
+#if TURBO_MENU_ASSIST_WITHOUT_PEDAL_ENABLED
 											// restore previous assist without pedal rotation
 											m_configuration_variables.ui8_assist_without_pedal_rotation_enabled = ui8_assist_without_pedal_rotation_temp;
 											ui8_display_function_status[1][TURBO] = m_configuration_variables.ui8_assist_without_pedal_rotation_enabled;
-										}
-										else {
-											// restore previous lights configuration
-											m_configuration_variables.ui8_lights_configuration = ui8_lights_configuration_temp;
-										}
+#endif
 										
-										if (ui8_lights_configuration_3 == 10) {
+#if TURBO_MENU_ASSIST_WITH_ERROR_ENABLED
 											// display status
-											ui8_display_alternative_lights_configuration = 1;
-										}
+											ui8_display_turbo_function_status = 1;
+#endif
 										break;
 								}
-								// display lights configuration
-								ui8_display_lights_configuration = m_configuration_variables.ui8_lights_configuration;
 								
 								break;
 						}
@@ -2522,7 +2328,7 @@ static void uart_receive_package(void)
 			// display menu function
 			if (ui8_menu_function_enabled) {
 				// display status lights configuration
-				ui8_display_alternative_lights_configuration = 0;
+				ui8_display_turbo_function_status = 0;
 				// set display parameter
 				if (((m_configuration_variables.ui8_set_parameter_enabled)
 				  &&(!ui8_assist_level_5_flag))
@@ -2606,72 +2412,40 @@ static void uart_receive_package(void)
 							break;
 						
 						case TURBO:
-							// set lights mode
+							// Set optional TURBO menu functions; lighting is configured in lights_profile.h.
 							switch (ui8_menu_index) {
 								case 1:
-									if (ui8_lights_configuration_1 == 11) {
+#if TURBO_MENU_STARTUP_ASSIST_ENABLED
 										// for restore startup assist enabled
 										ui8_startup_assist_enabled_temp = m_configuration_variables.ui8_startup_assist_enabled;
 										// change startup assist enabled
 										m_configuration_variables.ui8_startup_assist_enabled = !m_configuration_variables.ui8_startup_assist_enabled;
 										ui8_display_function_status[0][TURBO] = m_configuration_variables.ui8_startup_assist_enabled;
 										// display status
-										ui8_display_alternative_lights_configuration = 1;
-									}
-									else {
-										// for restore lights configuration
-										ui8_lights_configuration_temp = m_configuration_variables.ui8_lights_configuration;
-									
-										if (m_configuration_variables.ui8_lights_configuration != LIGHTS_CONFIGURATION_ON_STARTUP) {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_ON_STARTUP;
-										}
-										else {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_1;
-										}
-									}
+										ui8_display_turbo_function_status = 1;
+#endif
 									break;
 								case 2:
-									if (ui8_lights_configuration_2 == 9) {
+#if TURBO_MENU_ASSIST_WITHOUT_PEDAL_ENABLED
 										// for restore assist without pedal rotation
 										ui8_assist_without_pedal_rotation_temp = m_configuration_variables.ui8_assist_without_pedal_rotation_enabled;
 										// change assist without pedal rotation
 										m_configuration_variables.ui8_assist_without_pedal_rotation_enabled = !m_configuration_variables.ui8_assist_without_pedal_rotation_enabled;
 										ui8_display_function_status[1][TURBO] = m_configuration_variables.ui8_assist_without_pedal_rotation_enabled;
 										// display status
-										ui8_display_alternative_lights_configuration = 1;
-									}
-									else {
-										// for restore lights configuration
-										ui8_lights_configuration_temp = m_configuration_variables.ui8_lights_configuration;
-									
-										if (m_configuration_variables.ui8_lights_configuration != LIGHTS_CONFIGURATION_ON_STARTUP) {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_ON_STARTUP;
-										}
-										else {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_2;
-										}
-									}
+										ui8_display_turbo_function_status = 1;
+#endif
 									break;
 								case 3:
-									if (ui8_lights_configuration_3 == 10) {
+#if TURBO_MENU_ASSIST_WITH_ERROR_ENABLED
 										// change system error enabled
 										m_configuration_variables.ui8_assist_with_error_enabled = !m_configuration_variables.ui8_assist_with_error_enabled;
 										ui8_display_function_status[2][TURBO] = m_configuration_variables.ui8_assist_with_error_enabled;
 										// display status
-										ui8_display_alternative_lights_configuration = 1;
-									}
-									else {
-										if (m_configuration_variables.ui8_lights_configuration != LIGHTS_CONFIGURATION_ON_STARTUP) {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_ON_STARTUP;
-										}
-										else {
-											m_configuration_variables.ui8_lights_configuration = LIGHTS_CONFIGURATION_3;
-										}
-									}
+										ui8_display_turbo_function_status = 1;
+#endif
 									break;
 							}
-							// display lights configuration
-							ui8_display_lights_configuration = m_configuration_variables.ui8_lights_configuration;
 							break;
 					}
 					
@@ -2914,16 +2688,6 @@ static void uart_receive_package(void)
 			// assist level temp, to change or stop operation at change of level
 			ui8_assist_level_temp = ui8_assist_level;
 			
-			// set lights
-#if ENABLE_LIGHTS
-			// switch on/switch off lights
-			if ((ui8_lights_flag)||(ui8_lights_on_5s)) {
-				ui8_lights_state = 1;
-			}
-			else {
-				ui8_lights_state = 0;
-			}
-#endif
 			
 			// ui8_rx_buffer[2] current max?
 			
@@ -3135,25 +2899,25 @@ static void uart_send_package(void)
 			if (ui8_display_fault_code == ERROR_WRITE_EEPROM) {
 				// shared with ERROR_MOTOR_CHECK
 				// instead of E09, display blinking E08
-				if (ui8_default_flash_state) {
+				if (ui8_display_flash_phase >= 3U) {
 					ui8_tx_buffer[5] = 8;
 				}
 			}
 			else if (ui8_display_fault_code == ERROR_OVERVOLTAGE) {	
 				// instead of E01, display blinking E06
-				if (ui8_default_flash_state) {
+				if (ui8_display_flash_phase >= 3U) {
 					ui8_tx_buffer[5] = 6;
 				}
 			}
 			else if (ui8_display_fault_code == ERROR_THROTTLE) {	
 				// instead of E05, display blinking E03
-				if (ui8_default_flash_state) {
+				if (ui8_display_flash_phase >= 3U) {
 					ui8_tx_buffer[5] = 3;
 				}
 			}
 			else if (ui8_display_fault_code == ERROR_BATTERY_OVERCURRENT) {	
 				// instead of E07, display blinking E04
-				if (ui8_default_flash_state) {
+				if (ui8_display_flash_phase >= 3U) {
 					ui8_tx_buffer[5] = 4;
 				}
 			}
@@ -3201,7 +2965,7 @@ static void uart_send_package(void)
 			  &&((m_configuration_variables.ui8_set_parameter_enabled)
 				||(ui8_assist_level == OFF))) {
 				// display blinking function code
-				if (ui8_default_flash_state) {
+				if (ui8_display_flash_phase >= 3U) {
 					ui8_tx_buffer[5] = ui8_display_function_code;
 				}
 				else {
@@ -3254,7 +3018,7 @@ static void uart_send_package(void)
 						break;
 				}
 			}
-			else if ((ui8_menu_counter <= ui8_delay_display_function)&&(ui8_menu_index > 0U)&&((ui8_assist_level < TOUR)||(ui8_display_alternative_lights_configuration))) { // OFF & ECO & alternative lights configuration
+			else if ((ui8_menu_counter <= ui8_delay_display_function)&&(ui8_menu_index > 0U)&&((ui8_assist_level < TOUR)||(ui8_display_turbo_function_status))) { // OFF & ECO & TURBO function
 			  uint8_t index_temp = (ui8_display_function_status[ui8_menu_index - 1][ui8_assist_level]);
 			  switch (index_temp) {
 				case 0:
@@ -3268,7 +3032,8 @@ static void uart_send_package(void)
 			  }
 			}
 			else if ((ui8_menu_counter <= ui8_delay_display_function)&&(ui8_menu_index > 0U)&&(ui8_assist_level == TURBO)) {
-				ui16_display_data = ui16_display_data_factor / (ui8_display_lights_configuration * (uint8_t)100 + DISPLAY_STATUS_OFFSET);
+				// Removed light-mode menu slot: show disabled.
+				ui16_display_data = ui16_display_data_factor / FUNCTION_STATUS_OFF;
 			}
 			else if ((ui8_menu_counter <= ui8_delay_display_function)&&(ui8_menu_index > 0U)) {
 				ui16_display_data = ui16_display_data_factor / (ui8_display_riding_mode * (uint8_t)100 + DISPLAY_STATUS_OFFSET);

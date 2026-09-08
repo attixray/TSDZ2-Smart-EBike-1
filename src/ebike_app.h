@@ -47,7 +47,6 @@ typedef struct _configuration_variables
   uint8_t ui8_set_parameter_enabled;
   uint8_t ui8_street_mode_enabled;
   uint8_t ui8_riding_mode;
-  uint8_t ui8_lights_configuration;
   uint8_t ui8_startup_boost_enabled;
   uint8_t ui8_auto_display_data_enabled;
   uint8_t ui8_torque_sensor_adv_enabled; 
